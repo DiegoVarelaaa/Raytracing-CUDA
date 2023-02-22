@@ -8,22 +8,59 @@
 #include "Raytracer.h"
 #include "cudaErrors.h"
 
-__global__ void render(int xResolution, int yResolution, Color *image, RayTracer *RT) { //Kernel de renderización
+struct distanceStruct{
+    Primitive *object; 
+    Ray ray;
+};
+struct shortestDistanceStruct{
+    Primitive *object; 
+    Ray ray;
+};
+
+__global__ void intersectionTestOp(int xResolution, int yResolution, int primitivesSize, distanceStruct *distance_struct_array, RayTracer *RT) { //Kernel de renderización
+    int i = threadIdx.x + blockIdx.x * blockDim.x;  //Calculo del índice i
+    int j = threadIdx.y + blockIdx.y * blockDim.y;  //Calculo del ínidce j
+    int k = blockIdx.z * blockDim.z;
+    if((i >= xResolution) || (j >= yResolution) || (k >= primitivesSize)) return;        //Si se sale de las dimensiones retorna
     
+    Vector xPixel = (RT->sItr.pixelWidth)*i;
+    Vector yPixel = (RT->sItr.pixelHeight)*j;
+    Ray primaryRay(RT->observer.from, (RT->sItr.scanLine - yPixel) + xPixel);
+
+    // Intersection test
+    int operationCounter = k*xResolution*yResolution + j*xResolution + i;
+    Primitive *obj;
+    (RT->scene.primitives[k])->rayIntersection(&primaryRay, &obj);
+    distance_struct_array[operationCounter].ray = primaryRay;
+    distance_struct_array[operationCounter].object = obj;
+
+    printf("i:%d j:%d k:%d OpCounter:%d   Distance: %f \n", i, j, k, operationCounter, primaryRay.distance);
+    // int pixelCounter = j*xResolution + i;
+    // image[pixelCounter] = RT->shading(primaryRay, object, 0)*(255);
+}
+
+__global__ void intersectionTestConditionCheck(int xResolution, int yResolution, int primitivesSize, distanceStruct *distance_struct_array, shortestDistanceStruct *shortest_distance_struct_array) { //Kernel de renderización
     int i = threadIdx.x + blockIdx.x * blockDim.x;  //Calculo del índice i
     int j = threadIdx.y + blockIdx.y * blockDim.y;  //Calculo del ínidce j
     if((i >= xResolution) || (j >= yResolution)) return;        //Si se sale de las dimensiones retorna
 
-    Primitive *object;
     int pixelCounter = j*xResolution + i;
-    Vector yPixel = (RT->sItr.pixelHeight)*j;
-    Vector xPixel = (RT->sItr.pixelWidth)*i;
-    Ray primaryRay(RT->observer.from, (RT->sItr.scanLine - yPixel) + xPixel);
-    RT->intersectionTest(&primaryRay, &object);
-    // printf("I FINISHED THE INTERSECTION TEST \n"); 
-    image[pixelCounter] = RT->shading(primaryRay, object, 0)*(255);
-    // printf("IM DONE IN THE KERNEL \n");
+    int numPixels = xResolution*yResolution;
+    Primitive *closest_object;
+    Ray closest_ray;
+    for(int n = 0; n < primitivesSize; n++) { 
+        // printf("i:%d j:%d Distance: %f \n", i , j , distance_struct_array[(n*xResolution*yResolution)+pixelCounter].ray.distance);
+        if(distance_struct_array[n*numPixels+pixelCounter].ray.distance < closest_ray.distance){
+            closest_ray = distance_struct_array[n*numPixels+pixelCounter].ray;
+            closest_object = distance_struct_array[n*numPixels+pixelCounter].object;
+        }
+    }
+    shortest_distance_struct_array[pixelCounter].ray = closest_ray;
+    shortest_distance_struct_array[pixelCounter].object = closest_object;
+
+    printf("i:%d j:%d pixelCounter:%d Distance: %f \n", i, j, pixelCounter,closest_ray.distance);
 }
+
 
 int main(int argc, char *argv[]) {
      // Read NFF scene
@@ -45,34 +82,48 @@ int main(int argc, char *argv[]) {
 
     if (!readFile(filename, &RT_host, RT_device)) return 0;
 
-
     //RENDERIZADO
     int xResolution = RT_host.screen.width;     //Resolución en x
     int yResolution = RT_host.screen.height;    //Resolución en y
-    int x_blocks = 8;    //Numero de bloques en x
-    int y_blocks = 8;    //Numero de bloques en y
+    int x_threads = 4;    //Numero de threads en x
+    int y_threads = 4;    //Numero de threads en y
+    int primitivesSize = RT_host.scene.pSize;
 
-    dim3 blocks(xResolution/x_blocks+1, yResolution/y_blocks+1);   //Calculo del número de bloques
-    dim3 threads(x_blocks, y_blocks);            //Calculo del número de threads
+    dim3 blocks_intersection_op(xResolution/x_threads+1, yResolution/y_threads+1, primitivesSize);   //Cálculo del número de bloques de intersección
+    dim3 threads_intersection_op(x_threads, y_threads);            //Definición del número de threads de intersección
+    dim3 blocks_intersection_cond_chck(xResolution/x_threads+1, yResolution/y_threads+1);   //Cálculo del número de bloques de checkeo de condición
+    dim3 threads_intersection_cond_chck(x_threads, y_threads);            //Definición del número de threads de checkeo de condición
     
     Color *image;       //  Creación del apuntador del espacio a reservar
+    distanceStruct *distance_struct_array;// Estructura con el distance array, el rayo, y el objeto
+    shortestDistanceStruct *shortest_distance_struct_array;// Estructura con el el rayo, y el objeto de la menor distancia
+
+    
     checkCudaErrors(cudaMalloc((void **) &(image), xResolution*yResolution*sizeof(Color)));
-    // //Call render function
+    checkCudaErrors(cudaMalloc((void **) &(distance_struct_array), xResolution*yResolution*primitivesSize*sizeof(distanceStruct)));
+    checkCudaErrors(cudaMalloc((void **) &(shortest_distance_struct_array), xResolution*yResolution*sizeof(shortestDistanceStruct)));
+    // Call render function
     printf("-CUDA Version\n");
 
     clock_t start, stop;    //Variables temporales
     start = clock();        //Inicio del reloj
-    render<<<blocks, threads>>>(xResolution, yResolution, image, RT_device);  //Se lanza el kernel de renderización
 
+    intersectionTestOp<<<blocks_intersection_op, threads_intersection_op>>>(xResolution, yResolution, primitivesSize, distance_struct_array, RT_device);  //Se lanza el kernel de intersección
+    checkCudaErrors(cudaGetLastError());
+    checkCudaErrors(cudaDeviceSynchronize());
+
+    printf("\n\n\n");
+
+    intersectionTestConditionCheck<<<blocks_intersection_cond_chck, threads_intersection_cond_chck>>>(xResolution, yResolution, primitivesSize, distance_struct_array, shortest_distance_struct_array);  //Se lanza el kernel de checkeo de condición
     checkCudaErrors(cudaGetLastError());
     checkCudaErrors(cudaDeviceSynchronize());
    
     //Copy image from host to device
-    RT_host.image = new Color[xResolution*yResolution];
-    checkCudaErrors(cudaMemcpy ((RT_host.image), (image),  xResolution*yResolution*sizeof(Color), cudaMemcpyDeviceToHost));
+    // RT_host.image = new Color[xResolution*yResolution];
+    // checkCudaErrors(cudaMemcpy ((RT_host.image), (image),  xResolution*yResolution*sizeof(Color), cudaMemcpyDeviceToHost));
     cudaDeviceReset();
     //Image to ppm
-    RT_host.imageToPPM();
+    // RT_host.imageToPPM();
     stop = clock();     //Se detiene el reloj y se calcula el tiempo de renderización
     double timer_seconds = ((double)(stop - start)) / CLOCKS_PER_SEC;
     std::cerr << "took " << timer_seconds << " seconds.\n";
