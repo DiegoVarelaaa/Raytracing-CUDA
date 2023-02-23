@@ -34,7 +34,7 @@ __global__ void intersectionTestOp(int xResolution, int yResolution, int primiti
     distance_struct_array[operationCounter].ray = primaryRay;
     distance_struct_array[operationCounter].object = obj;
 
-    printf("i:%d j:%d k:%d OpCounter:%d   Distance: %f \n", i, j, k, operationCounter, primaryRay.distance);
+    // printf("i:%d j:%d k:%d OpCounter:%d   Distance: %f \n", i, j, k, operationCounter, primaryRay.distance);
     // int pixelCounter = j*xResolution + i;
     // image[pixelCounter] = RT->shading(primaryRay, object, 0)*(255);
 }
@@ -49,7 +49,6 @@ __global__ void intersectionTestConditionCheck(int xResolution, int yResolution,
     Primitive *closest_object;
     Ray closest_ray;
     for(int n = 0; n < primitivesSize; n++) { 
-        // printf("i:%d j:%d Distance: %f \n", i , j , distance_struct_array[(n*xResolution*yResolution)+pixelCounter].ray.distance);
         if(distance_struct_array[n*numPixels+pixelCounter].ray.distance < closest_ray.distance){
             closest_ray = distance_struct_array[n*numPixels+pixelCounter].ray;
             closest_object = distance_struct_array[n*numPixels+pixelCounter].object;
@@ -57,8 +56,18 @@ __global__ void intersectionTestConditionCheck(int xResolution, int yResolution,
     }
     shortest_distance_struct_array[pixelCounter].ray = closest_ray;
     shortest_distance_struct_array[pixelCounter].object = closest_object;
+    // printf("i:%d j:%d pixelCounter:%d Distance: %f \n", i, j, pixelCounter,closest_ray.distance);
+}
 
-    printf("i:%d j:%d pixelCounter:%d Distance: %f \n", i, j, pixelCounter,closest_ray.distance);
+__global__ void shading(int xResolution, int yResolution, Color *image, shortestDistanceStruct *shortest_distance_struct_array, RayTracer *RT) { //Kernel de shading
+    int i = threadIdx.x + blockIdx.x * blockDim.x;  //Calculo del índice i
+    int j = threadIdx.y + blockIdx.y * blockDim.y;  //Calculo del ínidce j
+    if((i >= xResolution) || (j >= yResolution)) return;        //Si se sale de las dimensiones retorna
+
+    int pixelCounter = j*xResolution + i;
+    Ray primaryRay = shortest_distance_struct_array[pixelCounter].ray;
+    Primitive *object = shortest_distance_struct_array[pixelCounter].object;
+    image[pixelCounter] = RT->shading(primaryRay, object, 0)*(255);
 }
 
 
@@ -112,18 +121,20 @@ int main(int argc, char *argv[]) {
     checkCudaErrors(cudaGetLastError());
     checkCudaErrors(cudaDeviceSynchronize());
 
-    printf("\n\n\n");
-
     intersectionTestConditionCheck<<<blocks_intersection_cond_chck, threads_intersection_cond_chck>>>(xResolution, yResolution, primitivesSize, distance_struct_array, shortest_distance_struct_array);  //Se lanza el kernel de checkeo de condición
+    checkCudaErrors(cudaGetLastError());
+    checkCudaErrors(cudaDeviceSynchronize());
+
+    shading<<<blocks_intersection_cond_chck, threads_intersection_cond_chck>>>(xResolution, yResolution, image, shortest_distance_struct_array, RT_device);  //Se lanza el kernel de checkeo de condición
     checkCudaErrors(cudaGetLastError());
     checkCudaErrors(cudaDeviceSynchronize());
    
     //Copy image from host to device
-    // RT_host.image = new Color[xResolution*yResolution];
-    // checkCudaErrors(cudaMemcpy ((RT_host.image), (image),  xResolution*yResolution*sizeof(Color), cudaMemcpyDeviceToHost));
+    RT_host.image = new Color[xResolution*yResolution];
+    checkCudaErrors(cudaMemcpy ((RT_host.image), (image),  xResolution*yResolution*sizeof(Color), cudaMemcpyDeviceToHost));
     cudaDeviceReset();
     //Image to ppm
-    // RT_host.imageToPPM();
+    RT_host.imageToPPM();
     stop = clock();     //Se detiene el reloj y se calcula el tiempo de renderización
     double timer_seconds = ((double)(stop - start)) / CLOCKS_PER_SEC;
     std::cerr << "took " << timer_seconds << " seconds.\n";
